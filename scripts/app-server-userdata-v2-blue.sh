@@ -52,7 +52,7 @@ cat >/opt/deploy/deploy.sh <<'DEPLOY'
 #  DEPLOY_TRACK=v1.2.0   -> that exact tag, even a pre-release (GREEN fleet)
 # =====================================================================
 set -uo pipefail
-REPO="Joyanta2934/AWS-Auto-Scaling-CI-CD-for-3-Tier-Application-Part-1-Auto-Scaling-for-3-Tier-Applications"
+REPO="JsJoyBitopibd/-AWS-Auto-Scaling-CI-CD-for-3-Tier-Application-Part-1-Auto-Scaling-for-3-Tier-Applications"
 TRACK="${DEPLOY_TRACK:-latest}"
 APP_DIR=/opt/app
 LOG=/var/log/bitopi-deploy.log
