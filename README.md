@@ -42,8 +42,9 @@ Request flow: **① Browser → ALB (:80)** → **② ALB → healthy backend EC
 │   ├── app.js                    ←   serves  /  and  /health , reads from MySQL
 │   └── package.json
 └── scripts/                      ← EC2 user-data (first-boot) scripts
-    ├── db-server-userdata.sh     ←   builds the MySQL database server
-    └── app-server-userdata.sh    ←   builds an app server (used by the Launch Template)
+    ├── db-server-userdata.sh              ←   builds the MySQL database server
+    ├── app-server-userdata.sh             ←   builds an app server (used by the Launch Template)
+    └── fix-ssh-key-permissions-windows.ps1 ←   makes a .pem key usable by Windows OpenSSH
 ```
 
 ## Account constraints and how the design adapts
@@ -62,14 +63,14 @@ This project was built in a **restricted course account**. The limits below are 
 ## Progress
 
 - [x] Part 1 architecture diagram
-- [ ] VPC + subnets across 2 AZs
-- [ ] Security groups (ALB / Backend / DB)
-- [ ] Database tier (MySQL on EC2)
-- [ ] Launch Template
-- [ ] Target Group + Application Load Balancer
-- [ ] Auto Scaling Group
-- [ ] Health checks + self-healing test
-- [ ] Scaling policy + load test (scale-out / scale-in)
+- [x] VPC + subnets across 2 AZs
+- [x] Security groups (ALB / Backend / DB)
+- [x] Database tier (MySQL on EC2)
+- [x] Launch Template
+- [x] Target Group + Application Load Balancer
+- [x] Auto Scaling Group
+- [x] Health checks + self-healing test
+- [x] Scaling policy + load test (scale-out / scale-in)
 - [ ] Part 2 CI/CD architecture diagram
 - [ ] CI/CD pipeline (Source → Build → Deploy)
 - [ ] Auto-deploy to new Auto Scaling instances

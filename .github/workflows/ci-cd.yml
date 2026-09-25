@@ -1,0 +1,97 @@
+# =====================================================================
+#  Bitopi 3-Tier App  -  CI/CD pipeline (GitHub Actions)
+#
+#  SOURCE  : a push to main that touches app/ (or a manual run)
+#  BUILD   : install dependencies
+#  TEST    : npm test  (Node's built-in test runner against /health, /version, /)
+#  ARTIFACT: bitopi-app.zip  (uploaded as a workflow artifact AND attached
+#            to a GitHub Release tagged with the package.json version)
+#  DEPLOY  : pull-based - every Auto Scaling instance runs a systemd timer
+#            that fetches the newest *stable* release every 60 seconds and
+#            restarts the app when the version changes. New instances do
+#            the same at boot. No IAM roles or AWS credentials needed.
+#
+#  release_type:
+#    stable    -> becomes GitHub "latest"  -> the BLUE fleet auto-deploys it
+#    candidate -> published as pre-release -> ignored by "latest"; only an
+#                 environment pinned to that tag (GREEN) picks it up
+# =====================================================================
+name: CI/CD - build, test, release
+
+on:
+  push:
+    branches: [ main ]
+    paths: [ 'app/**', '.github/workflows/ci-cd.yml' ]
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'stable = Blue auto-deploys · candidate = pre-release for Green'
+        type: choice
+        options: [ stable, candidate ]
+        default: stable
+
+permissions:
+  contents: write        # needed to create the GitHub Release
+
+jobs:
+  build-test-release:
+    name: Build → Test → Package → Release
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      # ---------- SOURCE ----------
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # ---------- BUILD ----------
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      # ---------- TEST ----------
+      - name: Run application tests
+        run: npm test
+
+      # ---------- ARTIFACT ----------
+      - name: Read version from package.json
+        id: ver
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Package deployable artifact (bitopi-app.zip)
+        run: |
+          echo "${{ steps.ver.outputs.version }}" > VERSION
+          echo "${{ github.sha }}"                > COMMIT
+          zip -r ../bitopi-app.zip app.js package.json VERSION COMMIT
+          unzip -l ../bitopi-app.zip
+
+      - name: Upload artifact to this workflow run
+        uses: actions/upload-artifact@v4
+        with:
+          name: bitopi-app-v${{ steps.ver.outputs.version }}
+          path: bitopi-app.zip
+
+      # ---------- RELEASE (what the servers pull from) ----------
+      - name: Publish GitHub Release v${{ steps.ver.outputs.version }}
+        working-directory: ${{ github.workspace }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.ver.outputs.version }}
+          TYPE: ${{ inputs.release_type || 'stable' }}
+        run: |
+          set -e
+          PRE=""; [ "$TYPE" = "candidate" ] && PRE="--prerelease"
+          NOTES="Built from ${GITHUB_SHA} by GitHub Actions run #${GITHUB_RUN_NUMBER} (${TYPE})."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists - replacing its asset"
+            gh release upload "$TAG" bitopi-app.zip --clobber
+          else
+            gh release create "$TAG" bitopi-app.zip --title "$TAG" --notes "$NOTES" $PRE
+          fi
+          echo "::notice title=Released::$TAG ($TYPE) -> https://github.com/${GITHUB_REPOSITORY}/releases/tag/$TAG"

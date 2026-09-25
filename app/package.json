@@ -1,0 +1,14 @@
+{
+  "name": "bitopi-3tier-app",
+  "version": "1.1.0",
+  "description": "Bitopi 3-Tier assignment - backend application tier",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mysql2": "^3.6.5"
+  }
+}
