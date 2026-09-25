@@ -1,0 +1,20 @@
+# ---- SSH private keys: NEVER commit these ----
+*.pem
+*.ppk
+
+# ---- Node ----
+node_modules/
+npm-debug.log*
+
+# ---- Local environment / secrets ----
+.env
+*.env
+
+# ---- OS / editor noise ----
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+
+# ---- Raw unnamed screenshots (only the P1-*/P2-* named ones are part of the submission) ----
+SS/Screenshot *.png
