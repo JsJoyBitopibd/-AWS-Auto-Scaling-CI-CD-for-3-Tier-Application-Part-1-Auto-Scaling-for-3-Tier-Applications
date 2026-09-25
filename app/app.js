@@ -1,6 +1,6 @@
 // =====================================================================
 //  Bitopi 3-Tier Application  -  Backend (Application Tier)
-//  v1.1.1  -  deployed automatically by the CI/CD pipeline (GitHub Actions ->
+//  v1.2.0  -  Blue/Green candidate release (GitHub Actions ->
 //  GitHub Release -> pull-based deployer on every Auto Scaling instance)
 //
 //    GET /health   shallow liveness check used by the ALB target group
@@ -74,7 +74,7 @@ ${dbStatus==='CONNECTED'
      <div class="row"><span class="k">Total visits recorded</span><span class="v">${visitCount}</span></div>`
   : `<div class="row"><span class="k">DB error</span><span class="bad">${dbError}</span></div>`}
 <p style="color:#64748b;margin-top:18px;font-size:13px">Deployed by GitHub Actions &rarr; GitHub Release &rarr; pull-based deployer on this server. Refresh to be routed to another instance.</p>
-<p style="color:#fbbf24;font-size:13px;font-weight:600">What&#39;s new in v${APP_VERSION}: this line reached the server through automatic pull-based deployment &mdash; no AWS console action was taken.</p>
+<p style="color:#fbbf24;font-size:13px;font-weight:600">What&#39;s new in v${APP_VERSION}: ${ENV_COLOR==='green' ? 'Blue/Green candidate &mdash; this version runs ONLY on the GREEN environment until the ALB listener is switched.' : 'this line reached the server through automatic pull-based deployment &mdash; no AWS console action was taken.'}</p>
 </div></body></html>`);
 });
 

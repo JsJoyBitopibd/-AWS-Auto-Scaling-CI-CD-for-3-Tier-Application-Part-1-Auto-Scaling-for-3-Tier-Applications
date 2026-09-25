@@ -1,6 +1,6 @@
 {
   "name": "bitopi-3tier-app",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Bitopi 3-Tier assignment - backend application tier",
   "main": "app.js",
   "scripts": {
