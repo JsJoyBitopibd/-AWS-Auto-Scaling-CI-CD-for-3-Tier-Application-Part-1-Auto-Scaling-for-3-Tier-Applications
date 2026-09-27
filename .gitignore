@@ -27,7 +27,7 @@ crash.log
 *.tfvars
 
 # ---- accidental copies / scratch folders in the project root (not part of the submission) ----
-New folder/
+New folder*/
 Claude outputs/
 /main.tf
 /*.pdf
