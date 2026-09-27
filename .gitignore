@@ -18,3 +18,16 @@ desktop.ini
 
 # ---- Raw unnamed screenshots (only the P1-*/P2-* named ones are part of the submission) ----
 SS/Screenshot *.png
+
+# Terraform (audit folder) - state can contain resource details, never commit
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars
+
+# ---- accidental copies / scratch folders in the project root (not part of the submission) ----
+New folder/
+Claude outputs/
+/main.tf
+/*.pdf
