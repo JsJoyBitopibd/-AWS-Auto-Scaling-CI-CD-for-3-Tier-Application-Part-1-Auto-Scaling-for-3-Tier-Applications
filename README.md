@@ -86,4 +86,6 @@ This project was built in a **restricted course account**. The limits below are 
 - [x] Part 2 CI/CD architecture diagram
 - [x] CI/CD pipeline (Source → Build → Deploy)
 - [x] Auto-deploy to new Auto Scaling instances
-- [~] Blue/Green deployment + rollback — **designed and prepared** (LT v3 user-data, candidate release path, runbook in the Part 2 doc §7); live switch + rollback pending a rebuilt stack
+- [x] Terraform audit — read-only check that every resource is still present (`terraform/`)
+- [x] Blue/Green deployment (green ASG on LT v3, tested on a :8080 test listener, production switched on :80)
+- [x] Rollback test — green → blue between two one-second samples, zero failed requests

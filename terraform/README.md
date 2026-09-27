@@ -169,6 +169,15 @@ rollback test).
 AWS resources are deleted by hand using the checklist in `docs/part2-cicd.md` §8. When you are
 done, delete the access key you created in Step 2 (IAM → your user → Security credentials).
 
+## Troubleshooting (seen in real use)
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `lookup sts.ap-south-1.amazonaws.com: no such host` | the PC's DNS server did not answer (office DNS hiccup) | `ipconfig /flushdns`, check with `nslookup sts.ap-south-1.amazonaws.com`, retry `apply` |
+| `terraform output` shows an old value | `output` never contacts AWS — it prints what the last **successful** `apply` saved in `terraform.tfstate` | only trust outputs after an `apply` that ended with `Apply complete!` |
+| `No valid credential sources found` | the `$env:AWS_...` lines live only in the PowerShell window they were typed in | paste them again in the new window |
+| green target shows *Unused* in the console | a target group is only health-checked when a listener forwards to it | add the `:8080` test listener (docs/part2-cicd.md §5 Step 6.2) |
+
 ## Why Terraform can report "missing" instead of crashing
 
 Normally a Terraform data source **aborts the whole run** when the thing it looks for does not

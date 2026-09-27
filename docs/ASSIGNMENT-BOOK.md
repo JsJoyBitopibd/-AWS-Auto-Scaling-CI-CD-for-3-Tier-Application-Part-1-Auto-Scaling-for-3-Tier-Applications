@@ -9,7 +9,7 @@
 | **Module** | 9 — AWS Auto Scaling & CI/CD for a 3-Tier Application |
 | **AWS Region** | Asia Pacific (Mumbai) — `ap-south-1` |
 | **Repository** | https://github.com/JsJoyBitopibd/-AWS-Auto-Scaling-CI-CD-for-3-Tier-Application-Part-1-Auto-Scaling-for-3-Tier-Applications |
-| **Date** | 25 September 2026 |
+| **Date** | 25 – 27 September 2026 |
 
 ### Contents
 
@@ -54,6 +54,7 @@ Request flow: **① Browser → ALB (:80)** → **② ALB → healthy backend EC
 | [Part 2 — CI/CD Pipeline](part2-cicd.md) | Pipeline architecture, source/build/deploy stages, auto-deploy to new instances, Blue/Green deployment, rollback test — with screenshots |
 | **[Assignment Book (PDF)](Bitopi_AWS_AutoScaling_CICD_Assignment.pdf)** | Everything below in one document for submission — cover, both parts, the communication guide, all screenshots |
 | [How the servers talk to each other](how-servers-communicate.md) | Every network hop in the system explained in plain words, with the real commands used at each hop |
+| [Terraform audit](../terraform/README.md) | Read-only Terraform program that reports which of the hand-built resources still exist (PRESENT / MISSING) and prints the values needed to continue — how to run it on Windows, step by step |
 
 ## Repository structure
 
@@ -76,8 +77,9 @@ Request flow: **① Browser → ALB (:80)** → **② ALB → healthy backend EC
     ├── app-server-userdata-v2-blue.sh     ←   Launch Template v2 (Part 2: pull-based deployer, BLUE)
     ├── app-server-userdata-v3-green.sh    ←   Launch Template v3 (Blue/Green: GREEN, pinned candidate)
     ├── deploy.sh                          ←   the deployer that runs on every server
-    └── fix-ssh-key-permissions-windows.ps1 ←   makes a .pem key usable by Windows OpenSSH
-├── .github/workflows/ci-cd.yml   ← the CI/CD pipeline (GitHub Actions)
+│   └── fix-ssh-key-permissions-windows.ps1 ←   makes a .pem key usable by Windows OpenSSH
+├── terraform/                    ← read-only audit: is every resource still there? (main.tf, audit.tf, README.md)
+└── .github/workflows/ci-cd.yml   ← the CI/CD pipeline (GitHub Actions)
 ```
 
 ## Account constraints and how the design adapts
@@ -107,7 +109,9 @@ This project was built in a **restricted course account**. The limits below are 
 - [x] Part 2 CI/CD architecture diagram
 - [x] CI/CD pipeline (Source → Build → Deploy)
 - [x] Auto-deploy to new Auto Scaling instances
-- [~] Blue/Green deployment + rollback — **designed and prepared** (LT v3 user-data, candidate release path, runbook in the Part 2 doc §7); live switch + rollback pending a rebuilt stack
+- [x] Terraform audit — read-only check that every resource is still present (`terraform/`)
+- [x] Blue/Green deployment (green ASG on LT v3, tested on a :8080 test listener, production switched on :80)
+- [x] Rollback test — green → blue between two one-second samples, zero failed requests
 
 
 ---
@@ -872,39 +876,94 @@ This is the property that ties the pipeline to the Auto Scaling Group: **scale-o
 
 ---
 
-### Step 6 — Blue/Green deployment: design and preparation
-
-> **Status: designed, prepared, and ready to execute; the live switch and rollback were not run because the course account's servers are reclaimed after a short window.** Everything needed is in the repository; the runbook in §7 executes it in ~15 minutes on a rebuilt Part 1 stack.
+### Step 6 — Blue/Green deployment and rollback (executed)
 
 **Design.**
 
 ```
-                         ┌── listener :80 default action ──┐
-   Internet ──▶  bitopi-alb                                 │  (exactly one of these at a time)
-                         │                                  ▼
+                         ┌── listener :80 default action ──┐   (production — exactly one colour at a time)
+   Internet ──▶  bitopi-alb                                 │
+                         │   listener :8080 ── test only ───┼──▶ always GREEN (used to test before the switch)
                          ├──▶ TG bitopi-app-tg        ──▶ ASG bitopi-app-asg        (BLUE,  LT v2, DEPLOY_TRACK=latest → v1.1.1)
                          └──▶ TG bitopi-app-tg-green  ──▶ ASG bitopi-app-asg-green  (GREEN, LT v3, DEPLOY_TRACK=v1.2.0)
-                                                            both fleets share the same MySQL server
+                                                            both fleets share the same MySQL server (10.0.13.216)
 ```
 
 | Element | Blue | Green |
 |---|---|---|
 | Target group | `bitopi-app-tg` | `bitopi-app-tg-green` (identical settings, `/health`) |
 | Auto Scaling Group | `bitopi-app-asg` (min 2 / max 4) | `bitopi-app-asg-green` (min 1 / max 2 for the lab) |
-| Launch Template | `bitopi-app-lt` **v2** (default) | `bitopi-app-lt` **v3** — [`app-server-userdata-v3-green.sh`](../scripts/app-server-userdata-v3-green.sh) |
-| Release track | `latest` (stable releases only) | pinned `v1.2.0` (a **candidate / pre-release**) |
+| Launch Template | `bitopi-app-lt` **v2** (default, and the version the blue ASG is pinned to) | `bitopi-app-lt` **v3** — [`app-server-userdata-v3-green.sh`](../scripts/app-server-userdata-v3-green.sh) |
+| Release track | `latest` (stable releases only) | pinned `v1.2.0` (a **pre-release**) |
 | Page badge | BLUE ENVIRONMENT, blue accent | GREEN ENVIRONMENT, green accent |
 
-**How the steps of the assignment map:**
+#### 6.0 Resuming on a partly reclaimed account (and one real mistake caught)
 
-1. **Deploy a new version to Green.** Push `v1.2.0` on a release branch; run the workflow with `release_type = candidate`. GitHub publishes it as a *pre-release*, so Blue's `latest` track ignores it. Create LT v3 + the green target group + the green ASG; its servers boot straight onto v1.2.0.
-2. **Perform health checks.** The green target group's own `/health` checks must show every green target *healthy* before any traffic moves. Optionally add a temporary listener on port 8080 → green to browse it directly.
-3. **Switch production traffic.** ALB → listener `HTTP:80` → *Edit default action* → forward to `bitopi-app-tg-green` (100 %). Users now get v1.2.0. Blue keeps running untouched.
-4. **Rollback.** Edit the same listener → forward to `bitopi-app-tg` again. Users are back on v1.1.1 within a second. Nothing had to be redeployed, because Blue was never changed — that is the whole point of Blue/Green versus a rolling update.
+The course account reclaims EC2 servers after a while, so the work resumed with the read-only **Terraform audit** (§9). It reported everything **PRESENT** — VPC, subnets, security groups, key pair, launch template v2, both target groups, ALB, blue ASG — except the **database server**, which had been reclaimed. The blue app servers had survived because the Auto Scaling Group replaces anything that disappears.
 
-**Two safeguards worth noting.** *(a)* Blue's ASG must reference Launch Template version **Default** (= v2), not *Latest* — otherwise creating v3 would make Blue launch green servers. *(b)* The candidate must never be a *stable* release while Green is being tested, or Blue would auto-pull it. The workflow's `release_type` input enforces this.
+![Terraform audit on resuming — only the DB server missing](../SS/TF-01-terraform-audit-before.png)
 
-**Prepared artifacts:** `app/package.json` at `1.2.0` with the Green-aware page (branch `release/v1.2.0`); `scripts/app-server-userdata-v3-green.sh`; the `candidate` path in the workflow.
+The audit also surfaced a mistake worth documenting. The candidate build (workflow run #3 on branch `release/v1.2.0`) had been run with the default `release_type = stable`, so GitHub published **v1.2.0 as a normal release marked *Latest***. The blue fleet follows `latest`, so it had quietly installed v1.2.0 — exactly the failure mode safeguard *(b)* below is meant to prevent (the release page showed 2,710 downloads of the v1.2.0 zip: every blue server checking once a minute). The fix needed no AWS action: v1.2.0 was edited to **Pre-release**, v1.1.1 became *Latest* again, and within a minute every blue server's deployer saw a different `VERSION` and rolled itself back to 1.1.1.
+
+![Candidate run #3 on release/v1.2.0](../SS/P2-16_candidate-run.png)
+![Releases after the fix — v1.2.0 Pre-release, v1.1.1 Latest](../SS/P2-17_releases-latest-vs-prerelease.png)
+
+**Database rebuilt with the same private IP.** `bitopi-db-server` was relaunched from the same user-data with *Primary IP* set to `10.0.13.216` (inside `bitopi-subnet-public1-ap-south-1a`, `10.0.0.0/20`). Because the address is the one baked into the launch templates as `DB_HOST`, nothing else had to change: the running blue servers reconnected on their next request.
+
+![DB server rebuilt — private IP 10.0.13.216](../SS/P2-19_db-server-rebuilt.png)
+![Baseline before Blue/Green — v1.1.1, BLUE, database connected](../SS/P2-20_blue-baseline-v1.1.1.png)
+
+#### 6.1 Deploy the new version to Green
+
+1. **Candidate release** — v1.2.0 (P2-16/P2-17 above) exists only as a pre-release, so only a fleet pinned to the tag installs it.
+2. **Green target group** `bitopi-app-tg-green` — HTTP 3000, health check `/health`, same settings as blue.
+3. **Launch Template v3** — created from v2 with the green user-data (`ENV_COLOR=green`, `DEPLOY_TRACK=v1.2.0`, `DB_HOST=10.0.13.216`). **Default stays 2**, and the blue ASG is pinned to version 2, so blue cannot pick up v3.
+4. **Green ASG** `bitopi-app-asg-green` — LT **version 3**, both public subnets, target group `bitopi-app-tg-green`, ELB health checks, min 1 / desired 1 / max 2. Its instance `i-02334b27eb02d41fe` booted and its deployer fetched **v1.2.0** on first boot.
+
+![Green target group created (empty)](../SS/P2-18_green-target-group.png)
+![Launch Template versions — v3 green, default still v2](../SS/P2-21_launch-template-v3.png)
+![Both Auto Scaling Groups — green on v3, blue on v2](../SS/P2-22_green-asg-created.png)
+
+#### 6.2 Health checks before any traffic moves
+
+A target group is only health-checked when a listener sends traffic to it, so right after creation the green target showed **"Unused — target group is not configured to receive traffic from the load balancer"**. To test green without exposing it to users, a **test listener** was added: `bitopi-alb` **HTTP:8080 → `bitopi-app-tg-green`** (plus an inbound rule for TCP 8080 on `bitopi-alb-sg`). Within a minute the green target was **healthy**, and `http://<alb>:8080/` showed **v1.2.0, GREEN ENVIRONMENT, database CONNECTED** — while the production URL on port 80 still showed v1.1.1 blue.
+
+![Green target group — 1 healthy, attached to bitopi-alb](../SS/P2-23_green-tg-healthy.png)
+![Green previewed on the test listener :8080 while production stays blue](../SS/P2-24_green-preview-8080.png)
+
+#### 6.3 Switch production traffic
+
+`bitopi-alb` → listener **HTTP:80** → *Edit* → default action **forward to `bitopi-app-tg-green` (100 %)**. The production URL immediately served **v1.2.0 GREEN**. Blue was left running, untouched. The Terraform audit, run independently against the AWS API, confirmed `listener_forwards_to = "bitopi-app-tg-green"` and the green ASG on launch template v3.
+
+![HTTP:80 now forwards to bitopi-app-tg-green](../SS/P2-25_listener-switched-to-green.png)
+![Production URL serving v1.2.0 GREEN](../SS/P2-26_app-green-in-production.png)
+![Terraform after the switch — listener_forwards_to = bitopi-app-tg-green](../SS/TF-02-terraform-after-switch.png)
+
+#### 6.4 Rollback test
+
+A PowerShell loop requested `/version` through the ALB once a second while the listener was edited back to **`bitopi-app-tg`**:
+
+```powershell
+$u = "http://bitopi-alb-1957667478.ap-south-1.elb.amazonaws.com/version"
+while ($true) { try { $r = Invoke-RestMethod $u -TimeoutSec 3
+  "{0}  v{1}  {2}  {3}" -f (Get-Date -Format HH:mm:ss), $r.version, $r.env, $r.instance }
+  catch { "{0}  ERROR  {1}" -f (Get-Date -Format HH:mm:ss), $_.Exception.Message }; Start-Sleep 1 }
+```
+
+| Time (UTC+6) | Response |
+|---|---|
+| 16:41:16 | `v1.2.0  green  i-02334b27eb02d41fe` — last green answer |
+| **16:41:17** | `v1.1.1  blue  i-0bd8f786ce68ed0f9` — first blue answer |
+| 16:41:18 → | alternating `i-0bd8f786ce68ed0f9` / `i-0aec18b50bb27272a`, all `v1.1.1 blue` |
+
+**Result: the rollback took effect between two consecutive one-second samples, and not a single request failed** (no `ERROR` line). Nothing was redeployed — blue had never been changed, which is the whole point of Blue/Green compared with a rolling update, where a rollback means deploying the old version all over again. Terraform again confirmed `listener_forwards_to = "bitopi-app-tg"`.
+
+![HTTP:80 back on bitopi-app-tg](../SS/P2-27_listener-rolled-back-to-blue.png)
+![Live monitor — green to blue in one second, zero errors](../SS/P2-28_rollback-live-monitor.png)
+![Production URL after rollback — v1.1.1 BLUE](../SS/P2-29_app-blue-after-rollback.png)
+![Terraform after the rollback — listener_forwards_to = bitopi-app-tg](../SS/TF-03-terraform-after-rollback.png)
+
+**Two safeguards, both proven necessary.** *(a)* Blue's ASG references a **fixed** Launch Template version (2), not *Latest* — otherwise creating v3 would have made blue launch green servers. *(b)* A candidate must be published as a **pre-release** (`release_type = candidate`); §6.0 shows what happens when it is not: the blue fleet deploys it automatically, because that is exactly what the pipeline is built to do.
 
 ## 6. Submission checklist → evidence
 
@@ -916,29 +975,31 @@ This is the property that ties the pipeline to the Auto Scaling Group: **scale-o
 | Deployment configuration | `scripts/deploy.sh`, `scripts/app-server-userdata-v2-blue.sh`; P2-05, P2-06 |
 | Successful deployment evidence | P2-07, P2-08, P2-09, P2-10, P2-11 |
 | New Auto Scaling instance deployment evidence | P2-12, P2-13, P2-14, P2-15 |
-| Blue/Green deployment design | §5 Step 6, diagram, `app-server-userdata-v3-green.sh`, workflow `candidate` input |
-| Rollback test evidence | **pending** — runbook in §7 |
-| Final documentation | this file + `README.md` + `docs/how-servers-communicate.md` |
+| Blue/Green deployment | §5 Step 6; `app-server-userdata-v3-green.sh`; P2-16 … P2-26, TF-02 |
+| Rollback test evidence | §6.4; P2-27, P2-28, P2-29, TF-03 |
+| Stack verification (Terraform audit) | `terraform/`; §9; TF-01, TF-02, TF-03 |
+| Final documentation | this file + `README.md` + `docs/how-servers-communicate.md` + `docs/Bitopi_AWS_AutoScaling_CICD_Assignment.pdf` |
 
-## 7. Runbook — finishing Blue/Green on a rebuilt stack (~15 min after Part 1 exists)
+## 7. Runbook — re-running Blue/Green on a rebuilt stack (~20 min)
 
-Use this if the account has reclaimed the servers. Part 1 rebuild first (VPC → security groups → DB server → LT v1 → TG → ALB → ASG; see Part 1 doc), then LT v2 + instance refresh (Step 2 above), then:
+Use this if the account reclaims the servers again.
 
-1. **Candidate release.** `git checkout release/v1.2.0` (or create it and bump `package.json` to `1.2.0`), push. GitHub → Actions → *CI/CD - build, test, release* → **Run workflow** → branch `release/v1.2.0`, `release_type` **candidate**. Confirm *Releases* shows **v1.2.0 Pre-release** and **v1.1.1 Latest**. 📸
-2. **Protect Blue.** ASG `bitopi-app-asg` → Edit → Launch template version **Default**.
-3. **Green target group.** `bitopi-app-tg-green`, HTTP 3000, health `/health`. 📸
-4. **LT v3.** Modify `bitopi-app-lt` → new version, source v2, user-data = `scripts/app-server-userdata-v3-green.sh` (check `DB_HOST` matches the rebuilt DB server's private IP). Do **not** set as default. 📸
-5. **Green ASG.** `bitopi-app-asg-green`, LT version 3, both public subnets, attach `bitopi-app-tg-green`, ELB health checks, min 1 / desired 1 / max 2. Wait until the green target is **healthy**. 📸
-6. **Switch.** ALB → Listeners → `HTTP:80` → Edit default action → `bitopi-app-tg-green`. Browse the ALB → **v1.2.0 GREEN**. 📸
-7. **Rollback.** Same listener → default action → `bitopi-app-tg`. Browse → **v1.1.1 BLUE**. 📸
-8. Delete `bitopi-app-asg-green` and `bitopi-app-tg-green` when done.
+1. **Audit.** `terraform apply -auto-approve` in `terraform/` (see [`terraform/README.md`](../terraform/README.md)). Rebuild only what is `MISSING`, in Part 1 order.
+2. **DB server with the same IP.** If `bitopi-db-server` is missing, relaunch it with *Advanced network configuration → Primary IP* = `10.0.13.216`, so no launch template needs editing.
+3. **Candidate release.** On `release/v1.2.0`, run the workflow with `release_type` = **candidate**. Check *Releases*: **v1.1.1 Latest**, **v1.2.0 Pre-release**. If v1.2.0 shows *Latest*, edit it → tick *Set as a pre-release* → *Update release*.
+4. **Protect blue.** Blue ASG must use Launch Template version **2** (a fixed number, not *Latest*).
+5. **Green TG** `bitopi-app-tg-green` (HTTP 3000, `/health`), **LT v3** from v2 with the green user-data (not default), **green ASG** on version 3.
+6. **Test listener.** `bitopi-alb-sg` inbound TCP 8080; ALB listener HTTP:8080 → green TG. Wait for *healthy*, browse `:8080`.
+7. **Switch.** Listener HTTP:80 → `bitopi-app-tg-green`. Verify page + `terraform output listener_forwards_to`.
+8. **Rollback.** Listener HTTP:80 → `bitopi-app-tg`, with the `/version` monitor loop running. Verify again.
+9. **Clean up the green side** (§8).
 
 ## 8. Cleanup checklist (avoid charges)
 
 Delete in this order (each step waits for the previous to finish):
 
-1. Auto Scaling Groups `bitopi-app-asg-green` (if created) and `bitopi-app-asg` — set desired 0, then delete
-2. Load balancer `bitopi-alb`, then target groups `bitopi-app-tg`, `bitopi-app-tg-green`
+1. Auto Scaling Groups `bitopi-app-asg-green` and `bitopi-app-asg` — delete (this terminates their instances)
+2. ALB listener HTTP:8080 and the TCP 8080 inbound rule on `bitopi-alb-sg`; then load balancer `bitopi-alb`; then target groups `bitopi-app-tg`, `bitopi-app-tg-green`
 3. EC2 instance `bitopi-db-server`
 4. Launch template `bitopi-app-lt` (all versions)
 5. Key pair `bitopi-key`
@@ -946,6 +1007,38 @@ Delete in this order (each step waits for the previous to finish):
 7. VPC `bitopi-vpc` (deletes its subnets, route tables and internet gateway)
 
 The GitHub repository, releases and workflow cost nothing and stay.
+
+## 9. Verifying the whole stack at any time — the Terraform audit
+
+Because the course account reclaims servers, "is everything still working?" is a question that comes up every time work resumes. Instead of clicking through six console pages, the repository carries a **read-only Terraform program** in [`terraform/`](../terraform/README.md) that answers it in one command.
+
+**What it is.** A Terraform configuration with *no* `resource` blocks — only lookups (`data` sources) and `check` blocks. `terraform apply` therefore cannot create, change or delete anything; it can only describe. It needs the same `Describe*` permissions the console already uses.
+
+**What it reports.** One line per resource — VPC, the 4 subnets, the 3 security groups, key pair, DB server, launch template (and whether version 2 with the deployer exists), target group (port 3000, `/health`), ALB, Auto Scaling Group, and the optional green pair — as `PRESENT` or `MISSING`, plus the values needed to continue: the DB server's private IP (= `DB_HOST` in the user-data), the ALB URL, the ASG's min/desired/max and launch-template version, and **which target group the `:80` listener is forwarding to** (`bitopi-app-tg` = blue, `bitopi-app-tg-green` = green). That last value is direct evidence for the Blue/Green switch and the rollback.
+
+**How to run it** (PowerShell, once Terraform is installed and an access key is in the environment — full step-by-step in `terraform/README.md`):
+
+```powershell
+cd E:\DevSecOps\Assignments\9_Module_Assignment\terraform
+terraform init
+terraform apply -auto-approve
+terraform output audit_summary
+```
+
+**How to read it.** Warnings named `check "<resource>"` mean that resource is missing or mis-configured (the message names the Part/Step that rebuilds it); the `audit_summary` box lists `PRESENT`/`MISSING` for everything else. No warnings and every line `PRESENT` = the stack is complete. The only warning that is *expected* before the Blue/Green step is `target_group_green_optional`.
+
+**Where it fits in the workflow.**
+
+| When | Command | Expected |
+|---|---|---|
+| Resuming work after the servers were reclaimed | `terraform apply -auto-approve` | tells you exactly what to rebuild by hand (§7) |
+| After rebuilding | same | everything `PRESENT`, only the green warning left |
+| After the Blue/Green switch | `terraform output listener_forwards_to` | `bitopi-app-tg-green` |
+| After the rollback | same | `bitopi-app-tg` |
+
+Evidence: `SS/TF-01-terraform-audit-before.png` (state found on resuming — only the DB server missing), `SS/TF-02-terraform-after-switch.png` (everything present, listener on green), `SS/TF-03-terraform-after-rollback.png` (listener back on blue).
+
+**Practical notes from real use.** `terraform output` does **not** contact AWS — it prints what the last *successful* `apply` saved in `terraform.tfstate`. Once, the office DNS server briefly failed (`lookup sts.ap-south-1.amazonaws.com: no such host`); `apply` aborted and `output` still showed the previous answer. Always check that `apply` ended with `Apply complete!` before trusting the outputs (`ipconfig /flushdns` and a retry fixed it).
 
 
 ---
@@ -1371,4 +1464,354 @@ if (require.main === module) {
 }
 module.exports = app;
 
+```
+
+### `app-server-userdata-v3-green.sh`
+
+Identical to `app-server-userdata-v2-blue.sh` above except for three values: `ENV_COLOR=green`, `DEPLOY_TRACK=v1.2.0` and the log line. Full file: `scripts/app-server-userdata-v3-green.sh`.
+
+### `terraform/main.tf`
+
+```hcl
+# =====================================================================
+#  Bitopi 3-Tier assignment  -  Terraform "is it still there?" audit
+#
+#  This configuration is READ-ONLY.  It contains ZERO `resource` blocks,
+#  so `terraform apply` can never create, change or delete anything in
+#  AWS.  It only *looks up* the resources that were built by hand in
+#  Part 1 / Part 2 and reports, for each one, PRESENT or MISSING.
+#
+#  Files:
+#    main.tf      - provider / version settings + the names we look for
+#    audit.tf     - the lookups, the PRESENT/MISSING checks, the report
+#    README.md    - how to run it on Windows, step by step
+# =====================================================================
+
+terraform {
+  required_version = ">= 1.5.0" # `check` blocks need Terraform 1.5+
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.40"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.region
+  # Credentials are NOT written here.  Terraform reads them from
+  # environment variables (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+  # AWS_SESSION_TOKEN) or from `aws configure` - see README.md.
+}
+
+# ---- names used when the stack was built (change only if you renamed) ----
+variable "region" {
+  description = "Region the stack was built in"
+  type        = string
+  default     = "ap-south-1"
+}
+
+variable "prefix" {
+  description = "Name prefix used for every resource of the assignment"
+  type        = string
+  default     = "bitopi"
+}
+
+locals {
+  vpc_name        = "${var.prefix}-vpc"
+  subnet_glob     = "${var.prefix}-subnet-*" # bitopi-subnet-public1-ap-south-1a, ...
+  sg_names        = ["${var.prefix}-alb-sg", "${var.prefix}-backend-sg", "${var.prefix}-db-sg"]
+  key_pair_name   = "${var.prefix}-key"
+  db_server_name  = "${var.prefix}-db-server"
+  launch_template = "${var.prefix}-app-lt"
+  tg_blue         = "${var.prefix}-app-tg"
+  tg_green        = "${var.prefix}-app-tg-green"
+  alb_name        = "${var.prefix}-alb"
+  asg_blue        = "${var.prefix}-app-asg"
+  asg_green       = "${var.prefix}-app-asg-green"
+}
+```
+
+### `terraform/audit.tf`
+
+```hcl
+# =====================================================================
+#  audit.tf  -  look up every hand-built resource and report on it
+#
+#  Two kinds of lookups are used on purpose:
+#
+#   1. "plural" data sources (aws_vpcs, aws_subnets, aws_security_groups,
+#      aws_instances, aws_lbs, aws_autoscaling_groups).  These NEVER fail:
+#      when nothing matches they simply return an empty list.  That lets
+#      us print PRESENT / MISSING in the final report and also print
+#      useful values (DB private IP, ALB DNS name, ASG sizes ...).
+#
+#   2. `check` blocks with a "scoped" data source inside them.  Some
+#      resources only have a singular data source (key pair, launch
+#      template, target group) which would normally ABORT the whole run
+#      when the thing does not exist.  Inside a check block Terraform
+#      turns that abort into a *warning* instead, so the run continues
+#      and the warning itself is the MISSING report.
+# =====================================================================
+
+# ---------------------------------------------------------------------
+# 1. Network - VPC, subnets, security groups
+# ---------------------------------------------------------------------
+data "aws_vpcs" "vpc" {
+  filter {
+    name   = "tag:Name"
+    values = [local.vpc_name]
+  }
+}
+
+data "aws_subnets" "subnets" {
+  filter {
+    name   = "tag:Name"
+    values = [local.subnet_glob]
+  }
+}
+
+data "aws_subnet" "each" {
+  for_each = toset(data.aws_subnets.subnets.ids)
+  id       = each.value
+}
+
+data "aws_security_groups" "sgs" {
+  filter {
+    name   = "group-name"
+    values = local.sg_names
+  }
+}
+
+data "aws_security_group" "each" {
+  for_each = toset(data.aws_security_groups.sgs.ids)
+  id       = each.value
+}
+
+# ---------------------------------------------------------------------
+# 2. Database tier - the MySQL (MariaDB) EC2 server
+# ---------------------------------------------------------------------
+data "aws_instances" "db" {
+  filter {
+    name   = "tag:Name"
+    values = [local.db_server_name]
+  }
+  instance_state_names = ["pending", "running", "stopping", "stopped"]
+}
+
+# ---------------------------------------------------------------------
+# 3. Load balancer + listener  (list all ELBv2 LBs, then pick ours)
+# ---------------------------------------------------------------------
+data "aws_lbs" "all" {}
+
+data "aws_lb" "each" {
+  for_each = data.aws_lbs.all.arns
+  arn      = each.value
+}
+
+locals {
+  alb = one([for lb in data.aws_lb.each : lb if lb.name == local.alb_name])
+}
+
+data "aws_lb_listener" "http80" {
+  count             = local.alb == null ? 0 : 1
+  load_balancer_arn = local.alb.arn
+  port              = 80
+}
+
+# ---------------------------------------------------------------------
+# 4. Auto Scaling Groups (blue = Part 1/2, green = Blue/Green step)
+# ---------------------------------------------------------------------
+data "aws_autoscaling_groups" "bitopi" {
+  names = [local.asg_blue, local.asg_green]
+}
+
+data "aws_autoscaling_group" "each" {
+  for_each = toset(data.aws_autoscaling_groups.bitopi.names)
+  name     = each.value
+}
+
+# ---------------------------------------------------------------------
+# 5. Things that only have a singular lookup -> check blocks
+#    (a failure here prints a WARNING, never an error)
+# ---------------------------------------------------------------------
+check "key_pair" {
+  data "aws_key_pair" "this" {
+    key_name = local.key_pair_name
+  }
+  assert {
+    condition     = data.aws_key_pair.this.key_name == local.key_pair_name
+    error_message = "MISSING: key pair ${local.key_pair_name} (Part 1 - Step 2)"
+  }
+}
+
+check "launch_template" {
+  data "aws_launch_template" "this" {
+    name = local.launch_template
+  }
+  assert {
+    condition     = data.aws_launch_template.this.latest_version >= 2
+    error_message = "Launch template ${local.launch_template} exists but only has version ${data.aws_launch_template.this.latest_version}. Part 2 needs v2 (pull-based deployer) - see docs/part2-cicd.md Step 2."
+  }
+}
+
+check "target_group_blue" {
+  data "aws_lb_target_group" "this" {
+    name = local.tg_blue
+  }
+  assert {
+    condition     = data.aws_lb_target_group.this.port == 3000 && data.aws_lb_target_group.this.health_check[0].path == "/health"
+    error_message = "Target group ${local.tg_blue} exists but is not HTTP:3000 with health check /health."
+  }
+}
+
+check "target_group_green_optional" {
+  data "aws_lb_target_group" "green" {
+    name = local.tg_green
+  }
+  assert {
+    condition     = data.aws_lb_target_group.green.port == 3000
+    error_message = "Green target group ${local.tg_green} exists but is not on port 3000."
+  }
+}
+
+# ---------------------------------------------------------------------
+# 6. Assertions on the plural lookups (so they also show as warnings)
+# ---------------------------------------------------------------------
+check "vpc" {
+  assert {
+    condition     = length(data.aws_vpcs.vpc.ids) == 1
+    error_message = "MISSING: VPC ${local.vpc_name} (Part 1 - Step 1). Found ${length(data.aws_vpcs.vpc.ids)}."
+  }
+}
+
+check "subnets" {
+  assert {
+    condition     = length(data.aws_subnets.subnets.ids) == 4
+    error_message = "Expected 4 subnets named ${local.subnet_glob}, found ${length(data.aws_subnets.subnets.ids)} (Part 1 - Step 1)."
+  }
+}
+
+check "security_groups" {
+  assert {
+    condition     = length(data.aws_security_groups.sgs.ids) == 3
+    error_message = "Expected 3 security groups (${join(", ", local.sg_names)}), found ${length(data.aws_security_groups.sgs.ids)} (Part 1 - Step 2)."
+  }
+}
+
+check "db_server" {
+  assert {
+    condition     = length(data.aws_instances.db.ids) >= 1
+    error_message = "MISSING: EC2 instance ${local.db_server_name} (Part 1 - Step 3). The app's DB_HOST must be rebuilt."
+  }
+}
+
+check "alb" {
+  assert {
+    condition     = local.alb != null
+    error_message = "MISSING: Application Load Balancer ${local.alb_name} (Part 1 - Step 5)."
+  }
+}
+
+check "asg_blue" {
+  assert {
+    condition     = contains(data.aws_autoscaling_groups.bitopi.names, local.asg_blue)
+    error_message = "MISSING: Auto Scaling Group ${local.asg_blue} (Part 1 - Step 6)."
+  }
+}
+
+# ---------------------------------------------------------------------
+# 7. The report
+# ---------------------------------------------------------------------
+locals {
+  ok = {
+    vpc       = length(data.aws_vpcs.vpc.ids) == 1
+    subnets   = length(data.aws_subnets.subnets.ids) == 4
+    sgs       = length(data.aws_security_groups.sgs.ids) == 3
+    db        = length(data.aws_instances.db.ids) >= 1
+    alb       = local.alb != null
+    asg_blue  = contains(data.aws_autoscaling_groups.bitopi.names, local.asg_blue)
+    asg_green = contains(data.aws_autoscaling_groups.bitopi.names, local.asg_green)
+  }
+  mark = { for k, v in local.ok : k => (v ? "PRESENT" : "MISSING") }
+
+  blue_asg  = try(data.aws_autoscaling_group.each[local.asg_blue], null)
+  green_asg = try(data.aws_autoscaling_group.each[local.asg_green], null)
+  listener  = try(data.aws_lb_listener.http80[0], null)
+  # arn:aws:elasticloadbalancing:...:targetgroup/<NAME>/<hash>  ->  <NAME>
+  live_tg = local.listener == null ? "-" : try(regex("targetgroup/([^/]+)/", local.listener.default_action[0].target_group_arn)[0], "?")
+
+  db_ip   = length(data.aws_instances.db.private_ips) > 0 ? data.aws_instances.db.private_ips[0] : null
+  alb_dns = local.alb == null ? null : local.alb.dns_name
+
+  report = <<-EOT
+
+    ================  BITOPI 3-TIER AUDIT  (${var.region})  ================
+      VPC ${local.vpc_name} ........................ ${local.mark.vpc}
+      4 subnets ${local.subnet_glob} ........ ${local.mark.subnets}   (found ${length(data.aws_subnets.subnets.ids)})
+      3 security groups ........................ ${local.mark.sgs}   (found ${length(data.aws_security_groups.sgs.ids)}: ${join(", ", [for sg in data.aws_security_group.each : sg.name])})
+      DB server ${local.db_server_name} ............ ${local.mark.db}   ${local.db_ip == null ? "" : "private IP ${local.db_ip}"}
+      ALB ${local.alb_name} ............................ ${local.mark.alb}   ${local.alb_dns == null ? "" : local.alb_dns}
+      listener :80 currently forwards to ......... ${local.live_tg}
+      ASG ${local.asg_blue} (blue) ................ ${local.mark.asg_blue}   ${local.blue_asg == null ? "" : "min ${local.blue_asg.min_size} / desired ${local.blue_asg.desired_capacity} / max ${local.blue_asg.max_size}, LT ${try(local.blue_asg.launch_template[0].name, "?")} v${try(local.blue_asg.launch_template[0].version, "?")}"}
+      ASG ${local.asg_green} (green) .......... ${local.mark.asg_green}   (only needed for the Blue/Green step)
+      key pair / launch template / target groups : see the WARNINGS above
+                                                   (no warning = PRESENT)
+    ========================================================================
+
+    Everything marked MISSING (or named in a warning) must be rebuilt by
+    hand in the console - follow docs/part1-auto-scaling.md for Part 1 and
+    docs/part2-cicd.md section 7 for the Blue/Green steps.
+  EOT
+}
+
+output "audit_summary" {
+  description = "Human-readable PRESENT/MISSING report"
+  value       = local.report
+}
+
+output "db_private_ip" {
+  description = "Use this as DB_HOST in the launch-template user-data (null = DB server missing)"
+  value       = local.db_ip
+}
+
+output "alb_url" {
+  description = "Open this in the browser (null = ALB missing)"
+  value       = local.alb_dns == null ? null : "http://${local.alb_dns}/"
+}
+
+output "public_subnet_ids" {
+  description = "Subnets to pick for the ALB and the Auto Scaling Groups"
+  value       = { for s in data.aws_subnet.each : s.tags["Name"] => s.id if can(regex("public", s.tags["Name"])) }
+}
+
+output "security_group_ids" {
+  value = { for sg in data.aws_security_group.each : sg.name => sg.id }
+}
+
+output "blue_asg" {
+  value = local.blue_asg == null ? null : {
+    min                     = local.blue_asg.min_size
+    desired                 = local.blue_asg.desired_capacity
+    max                     = local.blue_asg.max_size
+    launch_template_version = try(local.blue_asg.launch_template[0].version, null)
+    health_check_type       = local.blue_asg.health_check_type
+    target_groups           = local.blue_asg.target_group_arns
+  }
+}
+
+output "green_asg" {
+  value = local.green_asg == null ? null : {
+    min                     = local.green_asg.min_size
+    desired                 = local.green_asg.desired_capacity
+    max                     = local.green_asg.max_size
+    launch_template_version = try(local.green_asg.launch_template[0].version, null)
+  }
+}
+
+output "listener_forwards_to" {
+  description = "Which target group gets production traffic right now (blue = bitopi-app-tg, green = bitopi-app-tg-green)"
+  value       = local.live_tg
+}
 ```

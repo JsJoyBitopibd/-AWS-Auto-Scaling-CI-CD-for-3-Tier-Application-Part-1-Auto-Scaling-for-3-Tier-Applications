@@ -157,94 +157,39 @@ This is the property that ties the pipeline to the Auto Scaling Group: **scale-o
 
 ---
 
-### Step 6 — Blue/Green deployment and rollback (executed)
+### Step 6 — Blue/Green deployment: design and preparation
+
+> **Status: designed, prepared, and ready to execute; the live switch and rollback were not run because the course account's servers are reclaimed after a short window.** Everything needed is in the repository; the runbook in §7 executes it in ~15 minutes on a rebuilt Part 1 stack.
 
 **Design.**
 
 ```
-                         ┌── listener :80 default action ──┐   (production — exactly one colour at a time)
-   Internet ──▶  bitopi-alb                                 │
-                         │   listener :8080 ── test only ───┼──▶ always GREEN (used to test before the switch)
+                         ┌── listener :80 default action ──┐
+   Internet ──▶  bitopi-alb                                 │  (exactly one of these at a time)
+                         │                                  ▼
                          ├──▶ TG bitopi-app-tg        ──▶ ASG bitopi-app-asg        (BLUE,  LT v2, DEPLOY_TRACK=latest → v1.1.1)
                          └──▶ TG bitopi-app-tg-green  ──▶ ASG bitopi-app-asg-green  (GREEN, LT v3, DEPLOY_TRACK=v1.2.0)
-                                                            both fleets share the same MySQL server (10.0.13.216)
+                                                            both fleets share the same MySQL server
 ```
 
 | Element | Blue | Green |
 |---|---|---|
 | Target group | `bitopi-app-tg` | `bitopi-app-tg-green` (identical settings, `/health`) |
 | Auto Scaling Group | `bitopi-app-asg` (min 2 / max 4) | `bitopi-app-asg-green` (min 1 / max 2 for the lab) |
-| Launch Template | `bitopi-app-lt` **v2** (default, and the version the blue ASG is pinned to) | `bitopi-app-lt` **v3** — [`app-server-userdata-v3-green.sh`](../scripts/app-server-userdata-v3-green.sh) |
-| Release track | `latest` (stable releases only) | pinned `v1.2.0` (a **pre-release**) |
+| Launch Template | `bitopi-app-lt` **v2** (default) | `bitopi-app-lt` **v3** — [`app-server-userdata-v3-green.sh`](../scripts/app-server-userdata-v3-green.sh) |
+| Release track | `latest` (stable releases only) | pinned `v1.2.0` (a **candidate / pre-release**) |
 | Page badge | BLUE ENVIRONMENT, blue accent | GREEN ENVIRONMENT, green accent |
 
-#### 6.0 Resuming on a partly reclaimed account (and one real mistake caught)
+**How the steps of the assignment map:**
 
-The course account reclaims EC2 servers after a while, so the work resumed with the read-only **Terraform audit** (§9). It reported everything **PRESENT** — VPC, subnets, security groups, key pair, launch template v2, both target groups, ALB, blue ASG — except the **database server**, which had been reclaimed. The blue app servers had survived because the Auto Scaling Group replaces anything that disappears.
+1. **Deploy a new version to Green.** Push `v1.2.0` on a release branch; run the workflow with `release_type = candidate`. GitHub publishes it as a *pre-release*, so Blue's `latest` track ignores it. Create LT v3 + the green target group + the green ASG; its servers boot straight onto v1.2.0.
+2. **Perform health checks.** The green target group's own `/health` checks must show every green target *healthy* before any traffic moves. Optionally add a temporary listener on port 8080 → green to browse it directly.
+3. **Switch production traffic.** ALB → listener `HTTP:80` → *Edit default action* → forward to `bitopi-app-tg-green` (100 %). Users now get v1.2.0. Blue keeps running untouched.
+4. **Rollback.** Edit the same listener → forward to `bitopi-app-tg` again. Users are back on v1.1.1 within a second. Nothing had to be redeployed, because Blue was never changed — that is the whole point of Blue/Green versus a rolling update.
 
-![Terraform audit on resuming — only the DB server missing](../SS/TF-01-terraform-audit-before.png)
+**Two safeguards worth noting.** *(a)* Blue's ASG must reference Launch Template version **Default** (= v2), not *Latest* — otherwise creating v3 would make Blue launch green servers. *(b)* The candidate must never be a *stable* release while Green is being tested, or Blue would auto-pull it. The workflow's `release_type` input enforces this.
 
-The audit also surfaced a mistake worth documenting. The candidate build (workflow run #3 on branch `release/v1.2.0`) had been run with the default `release_type = stable`, so GitHub published **v1.2.0 as a normal release marked *Latest***. The blue fleet follows `latest`, so it had quietly installed v1.2.0 — exactly the failure mode safeguard *(b)* below is meant to prevent (the release page showed 2,710 downloads of the v1.2.0 zip: every blue server checking once a minute). The fix needed no AWS action: v1.2.0 was edited to **Pre-release**, v1.1.1 became *Latest* again, and within a minute every blue server's deployer saw a different `VERSION` and rolled itself back to 1.1.1.
-
-![Candidate run #3 on release/v1.2.0](../SS/P2-16_candidate-run.png)
-![Releases after the fix — v1.2.0 Pre-release, v1.1.1 Latest](../SS/P2-17_releases-latest-vs-prerelease.png)
-
-**Database rebuilt with the same private IP.** `bitopi-db-server` was relaunched from the same user-data with *Primary IP* set to `10.0.13.216` (inside `bitopi-subnet-public1-ap-south-1a`, `10.0.0.0/20`). Because the address is the one baked into the launch templates as `DB_HOST`, nothing else had to change: the running blue servers reconnected on their next request.
-
-![DB server rebuilt — private IP 10.0.13.216](../SS/P2-19_db-server-rebuilt.png)
-![Baseline before Blue/Green — v1.1.1, BLUE, database connected](../SS/P2-20_blue-baseline-v1.1.1.png)
-
-#### 6.1 Deploy the new version to Green
-
-1. **Candidate release** — v1.2.0 (P2-16/P2-17 above) exists only as a pre-release, so only a fleet pinned to the tag installs it.
-2. **Green target group** `bitopi-app-tg-green` — HTTP 3000, health check `/health`, same settings as blue.
-3. **Launch Template v3** — created from v2 with the green user-data (`ENV_COLOR=green`, `DEPLOY_TRACK=v1.2.0`, `DB_HOST=10.0.13.216`). **Default stays 2**, and the blue ASG is pinned to version 2, so blue cannot pick up v3.
-4. **Green ASG** `bitopi-app-asg-green` — LT **version 3**, both public subnets, target group `bitopi-app-tg-green`, ELB health checks, min 1 / desired 1 / max 2. Its instance `i-02334b27eb02d41fe` booted and its deployer fetched **v1.2.0** on first boot.
-
-![Green target group created (empty)](../SS/P2-18_green-target-group.png)
-![Launch Template versions — v3 green, default still v2](../SS/P2-21_launch-template-v3.png)
-![Both Auto Scaling Groups — green on v3, blue on v2](../SS/P2-22_green-asg-created.png)
-
-#### 6.2 Health checks before any traffic moves
-
-A target group is only health-checked when a listener sends traffic to it, so right after creation the green target showed **"Unused — target group is not configured to receive traffic from the load balancer"**. To test green without exposing it to users, a **test listener** was added: `bitopi-alb` **HTTP:8080 → `bitopi-app-tg-green`** (plus an inbound rule for TCP 8080 on `bitopi-alb-sg`). Within a minute the green target was **healthy**, and `http://<alb>:8080/` showed **v1.2.0, GREEN ENVIRONMENT, database CONNECTED** — while the production URL on port 80 still showed v1.1.1 blue.
-
-![Green target group — 1 healthy, attached to bitopi-alb](../SS/P2-23_green-tg-healthy.png)
-![Green previewed on the test listener :8080 while production stays blue](../SS/P2-24_green-preview-8080.png)
-
-#### 6.3 Switch production traffic
-
-`bitopi-alb` → listener **HTTP:80** → *Edit* → default action **forward to `bitopi-app-tg-green` (100 %)**. The production URL immediately served **v1.2.0 GREEN**. Blue was left running, untouched. The Terraform audit, run independently against the AWS API, confirmed `listener_forwards_to = "bitopi-app-tg-green"` and the green ASG on launch template v3.
-
-![HTTP:80 now forwards to bitopi-app-tg-green](../SS/P2-25_listener-switched-to-green.png)
-![Production URL serving v1.2.0 GREEN](../SS/P2-26_app-green-in-production.png)
-![Terraform after the switch — listener_forwards_to = bitopi-app-tg-green](../SS/TF-02-terraform-after-switch.png)
-
-#### 6.4 Rollback test
-
-A PowerShell loop requested `/version` through the ALB once a second while the listener was edited back to **`bitopi-app-tg`**:
-
-```powershell
-$u = "http://bitopi-alb-1957667478.ap-south-1.elb.amazonaws.com/version"
-while ($true) { try { $r = Invoke-RestMethod $u -TimeoutSec 3
-  "{0}  v{1}  {2}  {3}" -f (Get-Date -Format HH:mm:ss), $r.version, $r.env, $r.instance }
-  catch { "{0}  ERROR  {1}" -f (Get-Date -Format HH:mm:ss), $_.Exception.Message }; Start-Sleep 1 }
-```
-
-| Time (UTC+6) | Response |
-|---|---|
-| 16:41:16 | `v1.2.0  green  i-02334b27eb02d41fe` — last green answer |
-| **16:41:17** | `v1.1.1  blue  i-0bd8f786ce68ed0f9` — first blue answer |
-| 16:41:18 → | alternating `i-0bd8f786ce68ed0f9` / `i-0aec18b50bb27272a`, all `v1.1.1 blue` |
-
-**Result: the rollback took effect between two consecutive one-second samples, and not a single request failed** (no `ERROR` line). Nothing was redeployed — blue had never been changed, which is the whole point of Blue/Green compared with a rolling update, where a rollback means deploying the old version all over again. Terraform again confirmed `listener_forwards_to = "bitopi-app-tg"`.
-
-![HTTP:80 back on bitopi-app-tg](../SS/P2-27_listener-rolled-back-to-blue.png)
-![Live monitor — green to blue in one second, zero errors](../SS/P2-28_rollback-live-monitor.png)
-![Production URL after rollback — v1.1.1 BLUE](../SS/P2-29_app-blue-after-rollback.png)
-![Terraform after the rollback — listener_forwards_to = bitopi-app-tg](../SS/TF-03-terraform-after-rollback.png)
-
-**Two safeguards, both proven necessary.** *(a)* Blue's ASG references a **fixed** Launch Template version (2), not *Latest* — otherwise creating v3 would have made blue launch green servers. *(b)* A candidate must be published as a **pre-release** (`release_type = candidate`); §6.0 shows what happens when it is not: the blue fleet deploys it automatically, because that is exactly what the pipeline is built to do.
+**Prepared artifacts:** `app/package.json` at `1.2.0` with the Green-aware page (branch `release/v1.2.0`); `scripts/app-server-userdata-v3-green.sh`; the `candidate` path in the workflow.
 
 ## 6. Submission checklist → evidence
 
@@ -256,31 +201,29 @@ while ($true) { try { $r = Invoke-RestMethod $u -TimeoutSec 3
 | Deployment configuration | `scripts/deploy.sh`, `scripts/app-server-userdata-v2-blue.sh`; P2-05, P2-06 |
 | Successful deployment evidence | P2-07, P2-08, P2-09, P2-10, P2-11 |
 | New Auto Scaling instance deployment evidence | P2-12, P2-13, P2-14, P2-15 |
-| Blue/Green deployment | §5 Step 6; `app-server-userdata-v3-green.sh`; P2-16 … P2-26, TF-02 |
-| Rollback test evidence | §6.4; P2-27, P2-28, P2-29, TF-03 |
-| Stack verification (Terraform audit) | `terraform/`; §9; TF-01, TF-02, TF-03 |
-| Final documentation | this file + `README.md` + `docs/how-servers-communicate.md` + `docs/Bitopi_AWS_AutoScaling_CICD_Assignment.pdf` |
+| Blue/Green deployment design | §5 Step 6, diagram, `app-server-userdata-v3-green.sh`, workflow `candidate` input |
+| Rollback test evidence | **pending** — runbook in §7 |
+| Final documentation | this file + `README.md` + `docs/how-servers-communicate.md` |
 
-## 7. Runbook — re-running Blue/Green on a rebuilt stack (~20 min)
+## 7. Runbook — finishing Blue/Green on a rebuilt stack (~15 min after Part 1 exists)
 
-Use this if the account reclaims the servers again.
+Use this if the account has reclaimed the servers. First run the read-only Terraform audit in [`terraform/`](../terraform/README.md) to learn exactly what is still there (it prints PRESENT/MISSING per resource, the DB server's private IP and the ALB URL). Then rebuild only what it reports missing — Part 1 first (VPC → security groups → DB server → LT v1 → TG → ALB → ASG; see Part 1 doc), then LT v2 + instance refresh (Step 2 above), then:
 
-1. **Audit.** `terraform apply -auto-approve` in `terraform/` (see [`terraform/README.md`](../terraform/README.md)). Rebuild only what is `MISSING`, in Part 1 order.
-2. **DB server with the same IP.** If `bitopi-db-server` is missing, relaunch it with *Advanced network configuration → Primary IP* = `10.0.13.216`, so no launch template needs editing.
-3. **Candidate release.** On `release/v1.2.0`, run the workflow with `release_type` = **candidate**. Check *Releases*: **v1.1.1 Latest**, **v1.2.0 Pre-release**. If v1.2.0 shows *Latest*, edit it → tick *Set as a pre-release* → *Update release*.
-4. **Protect blue.** Blue ASG must use Launch Template version **2** (a fixed number, not *Latest*).
-5. **Green TG** `bitopi-app-tg-green` (HTTP 3000, `/health`), **LT v3** from v2 with the green user-data (not default), **green ASG** on version 3.
-6. **Test listener.** `bitopi-alb-sg` inbound TCP 8080; ALB listener HTTP:8080 → green TG. Wait for *healthy*, browse `:8080`.
-7. **Switch.** Listener HTTP:80 → `bitopi-app-tg-green`. Verify page + `terraform output listener_forwards_to`.
-8. **Rollback.** Listener HTTP:80 → `bitopi-app-tg`, with the `/version` monitor loop running. Verify again.
-9. **Clean up the green side** (§8).
+1. **Candidate release.** `git checkout release/v1.2.0` (or create it and bump `package.json` to `1.2.0`), push. GitHub → Actions → *CI/CD - build, test, release* → **Run workflow** → branch `release/v1.2.0`, `release_type` **candidate**. Confirm *Releases* shows **v1.2.0 Pre-release** and **v1.1.1 Latest**. 📸
+2. **Protect Blue.** ASG `bitopi-app-asg` → Edit → Launch template version **Default**.
+3. **Green target group.** `bitopi-app-tg-green`, HTTP 3000, health `/health`. 📸
+4. **LT v3.** Modify `bitopi-app-lt` → new version, source v2, user-data = `scripts/app-server-userdata-v3-green.sh` (check `DB_HOST` matches the rebuilt DB server's private IP). Do **not** set as default. 📸
+5. **Green ASG.** `bitopi-app-asg-green`, LT version 3, both public subnets, attach `bitopi-app-tg-green`, ELB health checks, min 1 / desired 1 / max 2. Wait until the green target is **healthy**. 📸
+6. **Switch.** ALB → Listeners → `HTTP:80` → Edit default action → `bitopi-app-tg-green`. Browse the ALB → **v1.2.0 GREEN**. 📸
+7. **Rollback.** Same listener → default action → `bitopi-app-tg`. Browse → **v1.1.1 BLUE**. 📸
+8. Delete `bitopi-app-asg-green` and `bitopi-app-tg-green` when done.
 
 ## 8. Cleanup checklist (avoid charges)
 
 Delete in this order (each step waits for the previous to finish):
 
-1. Auto Scaling Groups `bitopi-app-asg-green` and `bitopi-app-asg` — delete (this terminates their instances)
-2. ALB listener HTTP:8080 and the TCP 8080 inbound rule on `bitopi-alb-sg`; then load balancer `bitopi-alb`; then target groups `bitopi-app-tg`, `bitopi-app-tg-green`
+1. Auto Scaling Groups `bitopi-app-asg-green` (if created) and `bitopi-app-asg` — set desired 0, then delete
+2. Load balancer `bitopi-alb`, then target groups `bitopi-app-tg`, `bitopi-app-tg-green`
 3. EC2 instance `bitopi-db-server`
 4. Launch template `bitopi-app-lt` (all versions)
 5. Key pair `bitopi-key`
@@ -317,6 +260,4 @@ terraform output audit_summary
 | After the Blue/Green switch | `terraform output listener_forwards_to` | `bitopi-app-tg-green` |
 | After the rollback | same | `bitopi-app-tg` |
 
-Evidence: `SS/TF-01-terraform-audit-before.png` (state found on resuming — only the DB server missing), `SS/TF-02-terraform-after-switch.png` (everything present, listener on green), `SS/TF-03-terraform-after-rollback.png` (listener back on blue).
-
-**Practical notes from real use.** `terraform output` does **not** contact AWS — it prints what the last *successful* `apply` saved in `terraform.tfstate`. Once, the office DNS server briefly failed (`lookup sts.ap-south-1.amazonaws.com: no such host`); `apply` aborted and `output` still showed the previous answer. Always check that `apply` ended with `Apply complete!` before trusting the outputs (`ipconfig /flushdns` and a retry fixed it).
+Evidence: `SS/TF-01-terraform-audit-before.png` (state found on resuming), `SS/TF-02-terraform-audit-after.png` (all present).

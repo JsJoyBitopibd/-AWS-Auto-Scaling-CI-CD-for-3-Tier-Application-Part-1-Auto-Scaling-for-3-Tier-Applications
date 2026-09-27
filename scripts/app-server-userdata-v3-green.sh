@@ -48,7 +48,7 @@ cat >/opt/deploy/deploy.sh <<'DEPLOY'
 #  its track from GitHub, and if the VERSION differs from what is running,
 #  installs it and restarts the app.  No AWS credentials required.
 #
-#  DEPLOY_TRACK=v1.2.0   -> newest stable GitHub Release   (BLUE fleet)
+#  DEPLOY_TRACK=latest   -> newest stable GitHub Release   (BLUE fleet)
 #  DEPLOY_TRACK=v1.2.0   -> that exact tag, even a pre-release (GREEN fleet)
 # =====================================================================
 set -uo pipefail
